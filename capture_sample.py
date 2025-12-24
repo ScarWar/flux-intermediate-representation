@@ -305,7 +305,7 @@ def main(
     guidance: float = 2.5,
     output_dir: str = "output",
     add_sampling_metadata: bool = True,
-    decode_intermediates_flag: bool = True,
+    should_decode_intermediates: bool = True,
 ):
     """
     Generate an image using the Flux model while capturing intermediate representations
@@ -323,7 +323,7 @@ def main(
         guidance: guidance value used for guidance distillation
         output_dir: Directory to save output image and intermediate representations
         add_sampling_metadata: Add the prompt to the image Exif metadata
-        decode_intermediates_flag: Whether to decode intermediate representations to images (default: True)
+        should_decode_intermediates: Whether to decode intermediate representations to images (default: True)
     """
     if model not in configs:
         available = ", ".join(configs.keys())
@@ -461,7 +461,7 @@ def main(
     print(f"Saved metadata to {metadata_path}")
 
     # Decode intermediate representations to images
-    if decode_intermediates_flag:
+    if should_decode_intermediates:
         print("\nDecoding intermediate representations...")
         # Ensure model components are on the right device
         if offload:

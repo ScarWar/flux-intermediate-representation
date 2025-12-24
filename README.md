@@ -68,7 +68,7 @@ By default, the script decodes each block's output as if it were the final predi
 uv run python capture_sample.py --prompt "a beautiful landscape"
 
 # Disable intermediate decoding (faster, saves only raw tensors)
-uv run python capture_sample.py --prompt "a beautiful landscape" --decode_intermediates_flag=False
+uv run python capture_sample.py --prompt "a beautiful landscape" --should_decode_intermediates=False
 ```
 
 The decoded images are saved as:
