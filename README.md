@@ -57,6 +57,25 @@ The script saves:
 - Generated image: `output/img_0.jpg`
 - Intermediate representations: `output/intermediates/capture_{timestamp}_{model}.pt`
 - Metadata JSON: `output/intermediates/metadata_{timestamp}_{model}.json`
+- Decoded intermediate images: `output/intermediates/decoded/` (if enabled)
+
+### Decoding Intermediate Representations
+
+By default, the script decodes each block's output as if it were the final prediction. This allows you to visualize what information is present at different depths of the network.
+
+```bash
+# With intermediate decoding (default)
+uv run python capture_sample.py --prompt "a beautiful landscape"
+
+# Disable intermediate decoding (faster, saves only raw tensors)
+uv run python capture_sample.py --prompt "a beautiful landscape" --decode_intermediates_flag=False
+```
+
+The decoded images are saved as:
+- `double_block_{block_idx}_step_{timestep}.jpg` - Output from double stream blocks (19 blocks)
+- `single_block_{block_idx}_step_{timestep}.jpg` - Output from single stream blocks (38 blocks)
+
+Each image shows what the model would generate if that block's output was treated as the final prediction, enabling research into which layers capture different aspects of the image.
 
 ### Loading Captured Data
 
@@ -75,6 +94,14 @@ block_0_outputs = double_blocks["block_0"]  # List of tuples
 # Each block has a list of tensors, one per timestep
 single_blocks = data["single_blocks"]
 block_0_outputs = single_blocks["block_0"]  # List of tensors
+
+# Access denoising context (needed for custom decoding)
+context = data["denoising_context"]
+# context["y"] - CLIP embeddings per timestep
+# context["img_state"] - Image state before each model call
+# context["timestep_pairs"] - (t_curr, t_prev) for each step
+# context["txt_seq_len"] - Text sequence length per timestep
+# context["guidance"] - Guidance value used
 
 # Access metadata
 metadata = data["metadata"]
