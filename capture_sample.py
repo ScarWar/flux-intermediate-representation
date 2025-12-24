@@ -5,8 +5,9 @@ from datetime import datetime
 
 import torch
 from fire import Fire
-from transformers import pipeline
+from PIL import Image
 
+from flux.modules.layers import timestep_embedding
 from flux.sampling import get_noise, get_schedule, prepare, unpack
 from flux.util import (
     configs,
@@ -17,8 +18,6 @@ from flux.util import (
     save_image,
 )
 
-NSFW_THRESHOLD = 0.85
-
 
 class HookManager:
     """Manages forward hooks to capture intermediate representations from Flux blocks."""
@@ -28,6 +27,14 @@ class HookManager:
         self.single_blocks_outputs = {}
         self.hooks = []
         self.current_timestep = 0
+        # Denoising context needed for decode_intermediates
+        self.denoising_context = {
+            "y": [],              # CLIP embedding (y) per timestep
+            "txt_seq_len": [],    # txt sequence length per timestep
+            "img_state": [],      # img tensor before model call per timestep
+            "timestep_pairs": [], # (t_curr, t_prev) pairs
+            "guidance": None,     # guidance value (same for all timesteps)
+        }
 
     def register_hooks(self, model):
         """Register forward hooks on all double and single blocks."""
@@ -71,6 +78,22 @@ class HookManager:
         """Set the current timestep for tracking."""
         self.current_timestep = timestep
 
+    def store_context(
+        self,
+        y: torch.Tensor,
+        txt_seq_len: int,
+        img_state: torch.Tensor,
+        t_curr: float,
+        t_prev: float,
+        guidance: float,
+    ):
+        """Store denoising context for the current timestep."""
+        self.denoising_context["y"].append(y.detach().cpu())
+        self.denoising_context["txt_seq_len"].append(txt_seq_len)
+        self.denoising_context["img_state"].append(img_state.detach().cpu())
+        self.denoising_context["timestep_pairs"].append((t_curr, t_prev))
+        self.denoising_context["guidance"] = guidance  # Same for all timesteps
+
     def remove_hooks(self):
         """Remove all registered hooks."""
         for hook in self.hooks:
@@ -82,6 +105,7 @@ class HookManager:
         return {
             "double_blocks": self.double_blocks_outputs,
             "single_blocks": self.single_blocks_outputs,
+            "denoising_context": self.denoising_context,
         }
 
 
@@ -122,6 +146,17 @@ def denoise_with_capture(
             img_input = torch.cat((img_input, img_cond_seq), dim=1)
             img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
         
+        # Store denoising context for decode_intermediates
+        # We store the CLIP embedding (y), txt sequence length, and img state
+        hook_manager.store_context(
+            y=vec,  # vec parameter is the CLIP embedding (y)
+            txt_seq_len=txt.shape[1],
+            img_state=img,
+            t_curr=t_curr,
+            t_prev=t_prev,
+            guidance=guidance,
+        )
+        
         # Call model - hooks will capture intermediate representations
         pred = model(
             img=img_input,
@@ -140,6 +175,123 @@ def denoise_with_capture(
     return img
 
 
+def decode_intermediates(
+    captured_data: dict,
+    flux_model,
+    ae,
+    height: int,
+    width: int,
+    output_dir: str,
+    device: torch.device,
+):
+    """
+    Decode intermediate representations by treating each block output as the final prediction.
+    
+    For each block at each timestep:
+    1. Pass the block output through final_layer to get a prediction
+    2. Apply the denoising step: result = img_state + (t_prev - t_curr) * pred
+    3. Unpack and decode with autoencoder
+    4. Save as separate image files
+    
+    Args:
+        captured_data: Dictionary containing captured block outputs and denoising context
+        flux_model: The Flux model (needed for final_layer)
+        ae: The autoencoder for decoding
+        height: Image height in pixels
+        width: Image width in pixels
+        output_dir: Directory to save decoded images
+        device: Torch device to use
+    """
+    double_blocks = captured_data["double_blocks"]
+    single_blocks = captured_data["single_blocks"]
+    context = captured_data["denoising_context"]
+    
+    # Create output directory for decoded images
+    decoded_dir = os.path.join(output_dir, "intermediates", "decoded")
+    os.makedirs(decoded_dir, exist_ok=True)
+    
+    num_timesteps = len(context["timestep_pairs"])
+    num_double_blocks = len(double_blocks)
+    num_single_blocks = len(single_blocks)
+    
+    print(f"Decoding intermediates: {num_double_blocks} double blocks, {num_single_blocks} single blocks, {num_timesteps} timesteps")
+    
+    # Get guidance value
+    guidance = context["guidance"]
+    
+    # Process each timestep
+    for timestep_idx in range(num_timesteps):
+        t_curr, t_prev = context["timestep_pairs"][timestep_idx]
+        y = context["y"][timestep_idx].to(device)
+        txt_seq_len = context["txt_seq_len"][timestep_idx]
+        img_state = context["img_state"][timestep_idx].to(device)
+        
+        # Compute the internal vec (conditioning) that final_layer expects
+        # vec = time_in(timestep_embedding) + guidance_in(guidance_embedding) + vector_in(y)
+        t_vec = torch.full((1,), t_curr, dtype=torch.bfloat16, device=device)
+        guidance_vec = torch.full((1,), guidance, dtype=torch.bfloat16, device=device)
+        
+        vec = flux_model.time_in(timestep_embedding(t_vec, 256))
+        if flux_model.params.guidance_embed:
+            vec = vec + flux_model.guidance_in(timestep_embedding(guidance_vec, 256))
+        vec = vec + flux_model.vector_in(y)
+        
+        # Process double blocks
+        for block_idx in range(num_double_blocks):
+            block_name = f"block_{block_idx}"
+            # Get img tensor from captured tuple (ignore txt)
+            img_out, _ = double_blocks[block_name][timestep_idx]
+            img_out = img_out.to(device)
+            
+            # Pass through final_layer to get prediction
+            pred = flux_model.final_layer(img_out, vec)
+            
+            # Apply denoising step
+            result = img_state + (t_prev - t_curr) * pred
+            
+            # Unpack and decode
+            result_unpacked = unpack(result.float(), height, width)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                decoded = ae.decode(result_unpacked)
+            
+            # Save image
+            decoded = decoded.clamp(-1, 1)
+            decoded_img = (decoded[0].permute(1, 2, 0) * 127.5 + 127.5).cpu().byte().numpy()
+            img_pil = Image.fromarray(decoded_img)
+            save_path = os.path.join(decoded_dir, f"double_block_{block_idx}_step_{timestep_idx}.jpg")
+            img_pil.save(save_path, quality=95)
+        
+        # Process single blocks
+        for block_idx in range(num_single_blocks):
+            block_name = f"block_{block_idx}"
+            # Get output tensor
+            output = single_blocks[block_name][timestep_idx].to(device)
+            
+            # Slice off txt portion (like model.py line 116)
+            img_out = output[:, txt_seq_len:, ...]
+            
+            # Pass through final_layer to get prediction
+            pred = flux_model.final_layer(img_out, vec)
+            
+            # Apply denoising step
+            result = img_state + (t_prev - t_curr) * pred
+            
+            # Unpack and decode
+            result_unpacked = unpack(result.float(), height, width)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                decoded = ae.decode(result_unpacked)
+            
+            # Save image
+            decoded = decoded.clamp(-1, 1)
+            decoded_img = (decoded[0].permute(1, 2, 0) * 127.5 + 127.5).cpu().byte().numpy()
+            img_pil = Image.fromarray(decoded_img)
+            save_path = os.path.join(decoded_dir, f"single_block_{block_idx}_step_{timestep_idx}.jpg")
+            img_pil.save(save_path, quality=95)
+    
+    total_images = num_timesteps * (num_double_blocks + num_single_blocks)
+    print(f"Saved {total_images} decoded intermediate images to {decoded_dir}")
+
+
 @torch.inference_mode()
 def main(
     model: str = "flux-schnell",
@@ -153,6 +305,7 @@ def main(
     guidance: float = 2.5,
     output_dir: str = "output",
     add_sampling_metadata: bool = True,
+    decode_intermediates_flag: bool = True,
 ):
     """
     Generate an image using the Flux model while capturing intermediate representations
@@ -170,6 +323,7 @@ def main(
         guidance: guidance value used for guidance distillation
         output_dir: Directory to save output image and intermediate representations
         add_sampling_metadata: Add the prompt to the image Exif metadata
+        decode_intermediates_flag: Whether to decode intermediate representations to images (default: True)
     """
     if model not in configs:
         available = ", ".join(configs.keys())
@@ -202,9 +356,6 @@ def main(
     hook_manager = HookManager()
     hook_manager.register_hooks(flux_model)
     print(f"Registered hooks on {len(flux_model.double_blocks)} double blocks and {len(flux_model.single_blocks)} single blocks")
-
-    # Initialize NSFW classifier
-    nsfw_classifier = pipeline("image-classification", model="Falconsai/nsfw_image_detection", device=device)
 
     # Generate random seed if not provided
     rng = torch.Generator(device="cpu")
@@ -271,7 +422,7 @@ def main(
     output_name = os.path.join(output_dir, "img_0.jpg")
     print(f"Done in {t1 - t0:.1f}s. Saving {output_name}")
     save_image(
-        nsfw_classifier, model, output_name, 0, x, add_sampling_metadata, prompt, track_usage=False
+        None, model, output_name, 0, x, add_sampling_metadata, prompt, track_usage=False
     )
 
     # Get captured data and prepare for saving
@@ -308,6 +459,27 @@ def main(
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
     print(f"Saved metadata to {metadata_path}")
+
+    # Decode intermediate representations to images
+    if decode_intermediates_flag:
+        print("\nDecoding intermediate representations...")
+        # Ensure model components are on the right device
+        if offload:
+            # Move flux_model back to GPU for final_layer access
+            flux_model = flux_model.to(torch_device)
+            # ae should already have decoder on GPU from above
+        decode_intermediates(
+            captured_data=captured_data,
+            flux_model=flux_model,
+            ae=ae,
+            height=height,
+            width=width,
+            output_dir=output_dir,
+            device=torch_device,
+        )
+        if offload:
+            flux_model.cpu()
+            torch.cuda.empty_cache()
 
     print("Done!")
 
