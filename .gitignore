@@ -1,0 +1,44 @@
+# Checkpoints and model files
+checkpoints/
+
+# Output directories
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.out
+*.err
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+
+# Lock files (optional - uncomment if you don't want to track)
+# uv.lock
+
