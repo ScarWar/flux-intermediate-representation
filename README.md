@@ -127,6 +127,57 @@ The decoded images are organized by timestep:
 
 Each image shows what the model would generate if that block's output was treated as the final prediction, enabling research into which layers capture different aspects of the image. Images are grouped by timestep for easier comparison across the denoising process.
 
+### Creating Visualizations
+
+The `create_visualization.py` utility can generate videos or GIFs from decoded intermediate images, showing the denoising process with text overlays indicating step ID, block type, and block ID.
+
+```bash
+# Create a GIF with all blocks (default)
+uv run python create_visualization.py --generation_id a1b2c3d4
+
+# Create an MP4 video
+uv run python create_visualization.py \
+    --generation_id a1b2c3d4 \
+    --output_format mp4
+
+# Only show double blocks
+uv run python create_visualization.py \
+    --generation_id a1b2c3d4 \
+    --block_type double
+
+# Only show single blocks
+uv run python create_visualization.py \
+    --generation_id a1b2c3d4 \
+    --block_type single
+
+# Limit to first 5 blocks per step
+uv run python create_visualization.py \
+    --generation_id a1b2c3d4 \
+    --max_blocks 5
+
+# Custom FPS and font size
+uv run python create_visualization.py \
+    --generation_id a1b2c3d4 \
+    --fps 4.0 \
+    --font_size 32
+```
+
+**Visualization Options:**
+- `--generation_id`: Unique generation ID (required)
+- `--output_dir`: Base output directory (default: `"output"`)
+- `--output_format`: `"gif"` or `"mp4"` (default: `"gif"`)
+- `--fps`: Frames per second (default: `2.0`)
+- `--block_type`: Filter by `"double"`, `"single"`, or `None` for all
+- `--max_blocks`: Maximum number of blocks per step to include
+- `--font_size`: Font size for text overlay (default: `24`)
+
+The visualization will be saved as `visualization_{generation_id}.gif` or `.mp4` in the generation directory. Each frame displays:
+- **Step ID**: Current denoising step
+- **Block Type**: `double` or `single`
+- **Block ID**: Index of the block within its type
+
+This makes it easy to visualize how the image evolves through different layers and timesteps of the denoising process.
+
 ### Loading Captured Data
 
 ```python
@@ -169,6 +220,7 @@ print(f"Steps: {metadata['num_steps']}")
 - **Unique Generation IDs**: Each generation gets a unique ID for easy organization
 - **Organized Output**: Files organized by generation ID and timestep for easy navigation
 - **Memory Management**: CPU offloading support for systems with limited VRAM
+- **Visualization Tools**: Create videos/GIFs from decoded intermediate representations with text overlays
 
 ## Development
 

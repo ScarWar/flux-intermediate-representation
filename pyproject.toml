@@ -20,6 +20,8 @@ dependencies = [
     "invisible-watermark",
     "accelerate",
     "pillow",
+    "imageio",
+    "imageio-ffmpeg",
 ]
 
 [project.optional-dependencies]
