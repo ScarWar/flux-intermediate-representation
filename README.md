@@ -43,7 +43,26 @@ uv run python capture_sample.py \
 
 # With memory offloading (for lower VRAM)
 uv run python capture_sample.py --prompt "your prompt" --offload
+
+# Multi-GPU mode (distributes models across multiple GPUs for better utilization)
+uv run python capture_sample.py \
+    --prompt "a beautiful landscape" \
+    --multi_gpu True
 ```
+
+### Command Line Options
+
+- `--model`: Model name (default: `flux-schnell`)
+- `--width`, `--height`: Image dimensions (must be multiples of 16, default: 256)
+- `--prompt`: Text prompt for image generation
+- `--seed`: Random seed for reproducibility (optional)
+- `--offload`: Enable CPU offloading to save VRAM (default: `False`)
+- `--multi_gpu`: Distribute models across multiple GPUs (default: `False`)
+- `--num_steps`: Number of denoising steps (default: 4 for schnell, 50 for dev)
+- `--guidance`: Guidance value for guidance-distilled models (default: 2.5)
+- `--output_dir`: Output directory (default: `output`)
+- `--should_decode_intermediates`: Decode intermediate representations to images (default: `True`)
+- `--add_sampling_metadata`: Add prompt to image EXIF metadata (default: `True`)
 
 ### Available Models
 
@@ -51,13 +70,44 @@ uv run python capture_sample.py --prompt "your prompt" --offload
 - `flux-dev` - Development model, 50 steps
 - `flux-dev-krea` - KREA fine-tuned model
 
+### Multi-GPU Support
+
+When running on nodes with multiple GPUs, you can enable multi-GPU mode to distribute models across different GPUs:
+
+**Distribution Strategy (for 8 GPUs):**
+- GPU 0: T5 encoder
+- GPU 1: CLIP encoder
+- GPU 2: Flux model (main model)
+- GPU 5: Autoencoder encoder
+- GPU 6: Autoencoder decoder
+
+This allows better GPU utilization by running different model components in parallel. Models are loaded directly to their target GPUs, avoiding CPU intermediate steps.
+
+**Note:** Multi-GPU mode and offload mode are mutually exclusive. Use `--multi_gpu True` for multi-GPU setups and `--offload` for single-GPU systems with limited VRAM.
+
 ### Output
 
-The script saves:
-- Generated image: `output/img_0.jpg`
-- Intermediate representations: `output/intermediates/capture_{timestamp}_{model}.pt`
-- Metadata JSON: `output/intermediates/metadata_{timestamp}_{model}.json`
-- Decoded intermediate images: `output/intermediates/decoded/` (if enabled)
+Each generation gets a unique 8-character ID based on timestamp, seed, and prompt. All outputs are organized in a directory named with this ID:
+
+```
+output/
+  └── {generation_id}/          # e.g., a1b2c3d4
+      ├── img_0.jpg             # Generated image
+      └── intermediates/
+          ├── capture_{timestamp}_{model}.pt      # Raw intermediate tensors
+          ├── metadata_{timestamp}_{model}.json   # Generation metadata
+          └── decoded/                            # Decoded intermediate images
+              ├── step_0/
+              │   ├── double_block_0.jpg
+              │   ├── double_block_1.jpg
+              │   ├── ...
+              │   ├── single_block_0.jpg
+              │   └── ...
+              ├── step_1/
+              └── ...
+```
+
+The generation ID is printed at the start of each run, making it easy to identify and organize multiple generations.
 
 ### Decoding Intermediate Representations
 
@@ -71,11 +121,11 @@ uv run python capture_sample.py --prompt "a beautiful landscape"
 uv run python capture_sample.py --prompt "a beautiful landscape" --should_decode_intermediates=False
 ```
 
-The decoded images are saved as:
-- `double_block_{block_idx}_step_{timestep}.jpg` - Output from double stream blocks (19 blocks)
-- `single_block_{block_idx}_step_{timestep}.jpg` - Output from single stream blocks (38 blocks)
+The decoded images are organized by timestep:
+- `step_{timestep}/double_block_{block_idx}.jpg` - Output from double stream blocks (19 blocks)
+- `step_{timestep}/single_block_{block_idx}.jpg` - Output from single stream blocks (38 blocks)
 
-Each image shows what the model would generate if that block's output was treated as the final prediction, enabling research into which layers capture different aspects of the image.
+Each image shows what the model would generate if that block's output was treated as the final prediction, enabling research into which layers capture different aspects of the image. Images are grouped by timestep for easier comparison across the denoising process.
 
 ### Loading Captured Data
 
@@ -83,7 +133,8 @@ Each image shows what the model would generate if that block's output was treate
 import torch
 
 # Load captured intermediate representations
-data = torch.load("output/intermediates/capture_YYYYMMDD_HHMMSS_flux-schnell.pt")
+# Note: Files are now organized by generation ID
+data = torch.load("output/{generation_id}/intermediates/capture_YYYYMMDD_HHMMSS_flux-schnell.pt")
 
 # Access double block outputs (19 blocks for standard FLUX)
 # Each block has a list of (img, txt) tuples, one per timestep
@@ -105,10 +156,19 @@ context = data["denoising_context"]
 
 # Access metadata
 metadata = data["metadata"]
+print(f"Generation ID: {metadata['generation_id']}")
 print(f"Model: {metadata['model']}")
 print(f"Prompt: {metadata['prompt']}")
 print(f"Steps: {metadata['num_steps']}")
 ```
+
+### Features
+
+- **Progress Bars**: Visual progress indicators during model loading and VRAM transfers
+- **Multi-GPU Support**: Automatic distribution of models across multiple GPUs for better utilization
+- **Unique Generation IDs**: Each generation gets a unique ID for easy organization
+- **Organized Output**: Files organized by generation ID and timestep for easy navigation
+- **Memory Management**: CPU offloading support for systems with limited VRAM
 
 ## Development
 
